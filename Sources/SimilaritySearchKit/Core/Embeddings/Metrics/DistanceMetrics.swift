@@ -15,24 +15,26 @@ import Foundation
 /// - Note: Use this metric when the magnitudes of the embeddings are not significant in your use case.
 public struct DotProduct: DistanceMetricProtocol {
     public init() {}
-
+    
     public func findNearest(for queryEmbedding: [Float], in neighborEmbeddings: [[Float]], resultsCount: Int) -> [(Float, Int)] {
         let scores = neighborEmbeddings.map { distance(between: queryEmbedding, and: $0) }
         return sortedScores(scores: scores, topK: resultsCount)
     }
-
+    
     public func distance(between firstEmbedding: [Float], and secondEmbedding: [Float]) -> Float {
         // Ensure the embeddings have the same length
         if firstEmbedding.count != secondEmbedding.count {
-            print("Embeddings must have the same length")
-            return -Float.greatestFiniteMagnitude
+#if DEBUG
+            print("[DotProduct] dimension mismatch: expected=\(firstEmbedding.count) actual=\(secondEmbedding.count)")
+#endif
+            return -Float.infinity
         }
-
+        
         var dotProduct: Float = 0
-
+        
         // Calculate dot product using Accelerate
         vDSP_dotpr(firstEmbedding, 1, secondEmbedding, 1, &dotProduct, vDSP_Length(firstEmbedding.count))
-
+        
         return dotProduct
     }
 }
@@ -44,32 +46,39 @@ public struct DotProduct: DistanceMetricProtocol {
 /// - Note: Use this metric when the magnitudes of the embeddings are significant in your use case and for sparse embeddings.
 public struct CosineSimilarity: DistanceMetricProtocol {
     public init() {}
-
+    
     public func findNearest(for queryEmbedding: [Float], in neighborEmbeddings: [[Float]], resultsCount: Int) -> [(Float, Int)] {
         let scores = neighborEmbeddings.map { distance(between: queryEmbedding, and: $0) }
         return sortedScores(scores: scores, topK: resultsCount)
     }
-
+    
     public func distance(between firstEmbedding: [Float], and secondEmbedding: [Float]) -> Float {
         // Ensure the embeddings have the same length
         if firstEmbedding.count != secondEmbedding.count {
-            print("Embeddings must have the same length")
-            return -1
+#if DEBUG
+            print("[CosineSimilarity] dimension mismatch: expected=\(firstEmbedding.count) actual=\(secondEmbedding.count)")
+#endif
+            return -Float.infinity
         }
-
+        
         var dotProduct: Float = 0
         var firstMagnitude: Float = 0
         var secondMagnitude: Float = 0
-
+        
         // Calculate dot product and magnitudes using Accelerate
         vDSP_dotpr(firstEmbedding, 1, secondEmbedding, 1, &dotProduct, vDSP_Length(firstEmbedding.count))
         vDSP_svesq(firstEmbedding, 1, &firstMagnitude, vDSP_Length(firstEmbedding.count))
         vDSP_svesq(secondEmbedding, 1, &secondMagnitude, vDSP_Length(secondEmbedding.count))
-
+        
         // Take square root of magnitudes
         firstMagnitude = sqrt(firstMagnitude)
         secondMagnitude = sqrt(secondMagnitude)
-
+        
+        // Guard against zero magnitude vectors to avoid NaN
+        if firstMagnitude == 0 || secondMagnitude == 0 {
+            return -Float.infinity
+        }
+        
         // Return cosine similarity
         return dotProduct / (firstMagnitude * secondMagnitude)
     }
@@ -82,24 +91,26 @@ public struct CosineSimilarity: DistanceMetricProtocol {
 /// - Note: Use this metric when the magnitudes of the embeddings are significant in your use case, and the embeddings are distributed in a Euclidean space.
 public struct EuclideanDistance: DistanceMetricProtocol {
     public init() {}
-
+    
     public func findNearest(for queryEmbedding: [Float], in neighborEmbeddings: [[Float]], resultsCount: Int) -> [(Float, Int)] {
         let distances = neighborEmbeddings.map { distance(between: queryEmbedding, and: $0) }
         return sortedDistances(distances: distances, topK: resultsCount)
     }
-
+    
     public func distance(between firstEmbedding: [Float], and secondEmbedding: [Float]) -> Float {
         // Ensure the embeddings have the same length
         if firstEmbedding.count != secondEmbedding.count {
-            print("Embeddings must have the same length")
-            return Float.greatestFiniteMagnitude
+#if DEBUG
+            print("[EuclideanDistance] dimension mismatch: expected=\(firstEmbedding.count) actual=\(secondEmbedding.count)")
+#endif
+            return Float.infinity
         }
-
+        
         var distance: Float = 0
-
+        
         // Calculate squared differences and sum them using Accelerate
         vDSP_distancesq(firstEmbedding, 1, secondEmbedding, 1, &distance, vDSP_Length(firstEmbedding.count))
-
+        
         // Return the square root of the summed squared differences
         return sqrt(distance)
     }
@@ -117,12 +128,12 @@ public struct EuclideanDistance: DistanceMetricProtocol {
 public func sortedScores(scores: [Float], topK: Int) -> [(Float, Int)] {
     // Combine indices & scores
     let indexedScores = scores.enumerated().map { index, score in (score, index) }
-
+    
     // Sort by decreasing score
     func compare(a: (Float, Int), b: (Float, Int)) throws -> Bool {
         return a.0 > b.0
     }
-
+    
     // Take top k neighbors
     do {
         return try indexedScores.topK(topK, by: compare)
@@ -142,12 +153,12 @@ public func sortedScores(scores: [Float], topK: Int) -> [(Float, Int)] {
 public func sortedDistances(distances: [Float], topK: Int) -> [(Float, Int)] {
     // Combine indices & distances
     let indexedDistances = distances.enumerated().map { index, score in (score, index) }
-
+    
     // Sort by increasing distance
     func compare(a: (Float, Int), b: (Float, Int)) throws -> Bool {
         return a.0 < b.0
     }
-
+    
     // Take top k neighbors
     do {
         return try indexedDistances.topK(topK, by: compare)

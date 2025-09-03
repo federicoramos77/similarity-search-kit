@@ -12,84 +12,99 @@ import Foundation
 /// during the encode/decode process
 public class TokenSplitter: TextSplitterProtocol {
     let tokenizer: any TokenizerProtocol
-
+    
     public required init(withTokenizer: any TokenizerProtocol) {
         self.tokenizer = withTokenizer
     }
-
-    public func split(text: String, chunkSize: Int = 510, overlapSize _: Int = 0) -> ([String], [[String]]?) {
+    
+    public func split(text: String, chunkSize: Int = 510, overlapSize: Int = 0) -> ([String], [[String]]?) {
         // Return an empty list if the text is empty or whitespace
-        if text.isEmpty || text.trimmingCharacters(in: .whitespaces).isEmpty {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return ([], [])
         }
-
+        
+        // Hard cap to 510 as this splitter is intended for BERT-like models
         let chunkSize = min(chunkSize, 510)
-
-        // Tokenize the text
+        let overlapTokens = max(0, overlapSize)
+        
+        // Tokenize once
         let tokens = tokenizer.tokenize(text: text)
-
-        // Initialize an empty list of chunks
+        var remainingTokens = tokens[...]
+        
         var chunks: [String] = []
         var chunkTokens: [[String]] = []
-
-        // Initialize a counter for the number of chunks
-        var numChunks = 0
-
-        // Create a variable to store the remaining tokens
-        var remainingTokens = tokens
-
-        // Loop until all tokens are consumed
+        
+        // Always make forward progress to avoid infinite loops
+        func advance(_ count: Int) {
+            let c = max(1, count)
+            let dropCount = min(c, remainingTokens.count)
+            remainingTokens.removeFirst(dropCount)
+        }
+        
         while !remainingTokens.isEmpty {
-            // Take the first chunkSize tokens as a chunk
-            let chunk = Array(remainingTokens.prefix(chunkSize))
-
-            // Decode the chunk into text
-            let chunkText = tokenizer.detokenize(tokens: chunk)
-
-            // Skip the chunk if it is empty or whitespace
-            if chunkText.isEmpty || chunkText.trimmingCharacters(in: .whitespaces).isEmpty {
-                // Remove the tokens corresponding to the chunk text from the remaining tokens
-                remainingTokens.removeFirst(chunk.count)
-                // Continue to the next iteration of the loop
+            // Window of up to chunkSize tokens
+            let windowCount = min(chunkSize, remainingTokens.count)
+            let window = Array(remainingTokens.prefix(windowCount))
+            
+            // Decode the window to try a punctuation-friendly cut
+            let windowText = tokenizer.detokenize(tokens: window)
+            
+            // Prefer sentence-ending punctuation, ignore newlines which can appear at index 0
+            let punctuationMarks: [Character] = [".", "?", "!"]
+            let lastPuncIndex = punctuationMarks
+                .compactMap { windowText.lastIndex(of: $0)?.utf16Offset(in: windowText) }
+                .max() ?? -1
+            
+            var chunkText = windowText
+            var usedTokenCount = window.count
+            
+            if lastPuncIndex != -1 {
+                // Candidate cut at punctuation
+                let end = min(windowText.count, lastPuncIndex + 1)
+                let endIdx = windowText.index(windowText.startIndex, offsetBy: end)
+                let candidate = String(windowText[..<endIdx])
+                
+                // Require the punctuation cut to be late enough and large enough
+                let approx = tokenizer.tokenize(text: candidate).count
+                let minTokensForCut = max(16, chunkSize / 3)                 // token floor
+                let minCharsForCut  = max(8, Int(Double(windowText.count) * 0.40)) // char floor ~40%
+                
+                if approx >= minTokensForCut && end >= minCharsForCut {
+                    chunkText = candidate
+                    usedTokenCount = min(max(approx, 1), window.count)
+                } else {
+                    // Too early or too small: keep full window
+                    chunkText = windowText
+                    usedTokenCount = window.count
+                }
+            }
+            
+            // Normalize whitespace
+            chunkText = chunkText.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if chunkText.isEmpty {
+                // Fallback: at least consume one token to avoid stalling
+                advance(1)
                 continue
             }
-
-            // Find the last period or punctuation mark in the chunk
-            let punctuationMarks: [Character] = [".", "?", "!", "\n"]
-            let lastPunctuation = punctuationMarks.compactMap { chunkText.lastIndex(of: $0)?.utf16Offset(in: chunkText) }.max() ?? -1
-
-            var chunkTextToAppend = chunkText
-
-            // If there is a punctuation mark
-            if lastPunctuation != -1 {
-                // Ensure the index is within the chunkText bounds
-                let safeIndex = min(chunkText.count - 1, lastPunctuation + 1)
-                // Truncate the chunk text at the punctuation mark
-                chunkTextToAppend = String(chunkText[..<chunkText.index(chunkText.startIndex, offsetBy: safeIndex)])
+            
+            // Append outputs
+            chunks.append(chunkText)
+            chunkTokens.append(Array(window.prefix(usedTokenCount)))
+            
+            // Advance with overlap: keep the tail of the used tokens
+            let advanceCount = usedTokenCount - min(overlapTokens, usedTokenCount - 1)
+            advance(advanceCount)
+            // Stop if only overlap-sized tokens remain; avoids tiny trailing duplicates
+            if overlapTokens > 0 && remainingTokens.count <= overlapTokens {
+                break
             }
-
-            // Remove any newline characters and strip any leading or trailing whitespace
-            chunkTextToAppend = chunkTextToAppend.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-
-            // Append the chunk text to the list of chunks
-            chunks.append(chunkTextToAppend)
-            chunkTokens.append(chunk)
-
-            // Remove the tokens corresponding to the chunk text from the remaining tokens
-            remainingTokens.removeFirst(tokenizer.tokenize(text: chunkTextToAppend).count)
-
-            // Increment the number of chunks
-            numChunks += 1
+            // Realign next window to a fresh word boundary. Avoid starting at subword tokens like "##s".
+            while let first = remainingTokens.first, first.hasPrefix("##") {
+                remainingTokens.removeFirst()
+            }
         }
-
-        // Handle the remaining tokens
-        if !remainingTokens.isEmpty {
-            let remainingText = tokenizer.detokenize(tokens: remainingTokens).replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-
-            chunks.append(remainingText)
-            chunkTokens.append(remainingTokens)
-        }
-
+        
         return (chunks, chunkTokens)
     }
 }

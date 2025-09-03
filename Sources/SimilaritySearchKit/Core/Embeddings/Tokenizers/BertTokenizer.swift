@@ -12,10 +12,10 @@ public class BertTokenizer: TokenizerProtocol {
     private let basicTokenizer = BasicTokenizer()
     private let wordpieceTokenizer: WordpieceTokenizer
     private let maxLen = 512
-
+    
     private let vocab: [String: Int]
     private let ids_to_tokens: [Int: String]
-
+    
     public init() {
         let url = Bundle.module.url(forResource: "bert_tokenizer_vocab", withExtension: "txt")!
         let vocabTxt = try! String(contentsOf: url)
@@ -30,58 +30,58 @@ public class BertTokenizer: TokenizerProtocol {
         self.ids_to_tokens = ids_to_tokens
         self.wordpieceTokenizer = WordpieceTokenizer(vocab: self.vocab)
     }
-
+    
     public func buildModelTokens(sentence: String) -> [Int] {
         var tokens = tokenizeToIds(text: sentence)
-
+        
         let clsSepTokenCount = 2 // Account for [CLS] and [SEP] tokens
-
+        
         if tokens.count + clsSepTokenCount > maxLen {
             print("Input sentence is too long \(tokens.count + clsSepTokenCount) > \(maxLen), truncating.")
             tokens = Array(tokens[..<(maxLen - clsSepTokenCount)])
         }
-
+        
         let paddingCount = maxLen - tokens.count - clsSepTokenCount
-
+        
         let inputTokens: [Int] = [
             tokenToId(token: "[CLS]"),
         ] + tokens + [
             tokenToId(token: "[SEP]"),
         ] + Array(repeating: 0, count: paddingCount)
-
+        
         return inputTokens
     }
-
+    
     /// - Note: This is lossy due to potential unknown tokens in source text
     public func detokenize(tokens: [String]) -> String {
         let decodedString = convertWordpieceToBasicTokenList(tokens)
         return decodedString
     }
-
+    
     public func buildModelInputs(from inputTokens: [Int]) -> (MLMultiArray, MLMultiArray) {
         let inputIds = MLMultiArray.from(inputTokens, dims: 2)
         let maskValue = 1
-
+        
         let attentionMaskValues: [Int] = inputTokens.map { token in
             token == 0 ? 0 : maskValue
         }
-
+        
         let attentionMask = MLMultiArray.from(attentionMaskValues, dims: 2)
-
+        
         return (inputIds, attentionMask)
     }
     
     /**
      Builds model inputs with type IDs from the given input tokens.
-
+     
      - Parameters:
-       - inputTokens: An array of integers representing input tokens.
-
+     - inputTokens: An array of integers representing input tokens.
+     
      - Returns: A tuple containing three `MLMultiArray` objects:
-       - The first `MLMultiArray` represents input IDs.
-       - The second `MLMultiArray` is the attention mask.
-       - The third `MLMultiArray` contains token type IDs.
-    */
+     - The first `MLMultiArray` represents input IDs.
+     - The second `MLMultiArray` is the attention mask.
+     - The third `MLMultiArray` contains token type IDs.
+     */
     public func buildModelInputsWithTypeIds(from inputTokens: [Int]) -> (MLMultiArray, MLMultiArray, MLMultiArray) {
         let (inputIds, attentionMask) = buildModelInputs(from: inputTokens)
         
@@ -96,7 +96,7 @@ public class BertTokenizer: TokenizerProtocol {
         let tokenTypeIds = MLMultiArray.from(tokenTypeIdValues, dims: 2)
         return (inputIds, attentionMask, tokenTypeIds)
     }
-
+    
     public func tokenize(text: String) -> [String] {
         var tokens: [String] = []
         for token in basicTokenizer.tokenize(text: text) {
@@ -106,44 +106,87 @@ public class BertTokenizer: TokenizerProtocol {
         }
         return tokens
     }
-
+    
     public func convertTokensToIds(tokens: [String]) throws -> [Int] {
-        return tokens.map { vocab[$0]! }
+        let unkId = vocab["[UNK]"]!
+        return tokens.map { vocab[$0] ?? unkId }
     }
-
+    
     /// Main entry point
     func tokenizeToIds(text: String) -> [Int] {
         return try! convertTokensToIds(tokens: tokenize(text: text))
     }
-
+    
     func tokenToId(token: String) -> Int {
         return vocab[token]!
     }
-
+    
     /// Un-tokenization: get tokens from tokenIds
     func idsToTokens(tokenIds: [Int]) -> [String] {
         return tokenIds.map { ids_to_tokens[$0]! }
     }
-
+    
     func convertWordpieceToBasicTokenList(_ wordpieceTokenList: [String]) -> String {
-        var tokenList: [String] = []
-        var individualToken: String = ""
-
+        var assembled: [String] = []
+        var current = ""
+        var joinNextToLast = false // when we saw a hyphen we join next token to previous
+        
+        func isSinglePunctuation(_ s: String) -> Bool {
+            guard s.count == 1, let scalar = s.unicodeScalars.first else { return false }
+            return CharacterSet.punctuationCharacters.contains(scalar)
+        }
+        
+        func isHyphen(_ s: String) -> Bool { s == "-" || s == "–" || s == "—" }
+        
         for token in wordpieceTokenList {
-            if token.starts(with: "##") {
-                individualToken += String(token.suffix(token.count - 2))
-            } else {
-                if individualToken.count > 0 {
-                    tokenList.append(individualToken)
+            if token.hasPrefix("##") {
+                current += String(token.dropFirst(2))
+                continue
+            }
+            
+            // flush previous word if any
+            if !current.isEmpty {
+                if joinNextToLast, let last = assembled.popLast() {
+                    assembled.append(last + current) // append without space due to previous hyphen
+                    joinNextToLast = false
+                } else {
+                    assembled.append(current)
                 }
-
-                individualToken = token
+                current.removeAll()
+            }
+            
+            if isSinglePunctuation(token) {
+                if isHyphen(token) {
+                    // attach hyphen to previous token and join next token without space
+                    if let last = assembled.popLast() {
+                        assembled.append(last + "-")
+                        joinNextToLast = true
+                    } else {
+                        assembled.append("-")
+                    }
+                } else {
+                    // attach punctuation to the previous token if possible
+                    if let last = assembled.popLast() {
+                        assembled.append(last + token)
+                    } else {
+                        assembled.append(token)
+                    }
+                }
+                continue
+            }
+            
+            // start a new normal token
+            current = token
+        }
+        
+        if !current.isEmpty {
+            if joinNextToLast, let last = assembled.popLast() {
+                assembled.append(last + current)
+            } else {
+                assembled.append(current)
             }
         }
-
-        tokenList.append(individualToken)
-
-        return tokenList.joined(separator: " ")
+        return assembled.joined(separator: " ")
     }
 }
 
@@ -151,38 +194,69 @@ class BasicTokenizer {
     let neverSplit = [
         "[UNK]", "[SEP]", "[PAD]", "[CLS]", "[MASK]",
     ]
-
+    
+    private let doLowerCase: Bool
+    private let stripAccents: Bool
+    
+    init(doLowerCase: Bool = true, stripAccents: Bool = true) {
+        self.doLowerCase = doLowerCase
+        self.stripAccents = stripAccents
+    }
+    
     func tokenize(text: String) -> [String] {
-        let foldedText = text.folding(options: .diacriticInsensitive, locale: nil)
-        let splitTokens = foldedText.components(separatedBy: NSCharacterSet.whitespaces)
-
-        let tokens: [String] = splitTokens.flatMap { token -> [String] in
+        // Normalize accents if requested
+        let baseText: String
+        if stripAccents {
+            baseText = text.folding(options: .diacriticInsensitive, locale: nil)
+        } else {
+            baseText = text
+        }
+        
+        // Split on whitespace AND newlines; remove empties
+        let splitTokens = baseText
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        
+        var tokens: [String] = []
+        for token in splitTokens {
             if neverSplit.contains(token) {
-                return [token]
+                tokens.append(token)
+                continue
             }
-
+            
             var tokenFragments: [String] = []
             var currentFragment = ""
-
-            for character in token.lowercased() {
-                if character.isLetter || character.isNumber || character == "°" {
-                    currentFragment.append(character)
-                } else if !currentFragment.isEmpty {
-                    tokenFragments.append(currentFragment)
-                    tokenFragments.append(String(character))
+            
+            for scalar in token.unicodeScalars {
+                // Treat alphanumerics as part of a word; keep degree sign
+                if CharacterSet.alphanumerics.contains(scalar) || scalar == "\u{00B0}" { // °
+                    currentFragment.unicodeScalars.append(scalar)
+                    continue
+                }
+                
+                // End current fragment if any
+                if !currentFragment.isEmpty {
+                    tokenFragments.append(doLowerCase ? currentFragment.lowercased() : currentFragment)
                     currentFragment = ""
+                }
+                
+                // Keep punctuation as its own token
+                if CharacterSet.punctuationCharacters.contains(scalar) {
+                    tokenFragments.append(String(scalar))
                 } else {
-                    tokenFragments.append(String(character))
+                    // Preserve any other visible symbol (e.g., emoji, math, currency) as its own token
+                    tokenFragments.append(String(scalar))
                 }
             }
-
+            
             if !currentFragment.isEmpty {
-                tokenFragments.append(currentFragment)
+                tokenFragments.append(doLowerCase ? currentFragment.lowercased() : currentFragment)
+                currentFragment = ""
             }
-
-            return tokenFragments
+            
+            tokens.append(contentsOf: tokenFragments)
         }
-
+        
         return tokens
     }
 }
@@ -191,11 +265,11 @@ class WordpieceTokenizer {
     private let unkToken = "[UNK]"
     private let maxInputCharsPerWord = 100
     private let vocab: [String: Int]
-
+    
     init(vocab: [String: Int]) {
         self.vocab = vocab
     }
-
+    
     /// `word`: A single token.
     /// Warning: this differs from the `pytorch-transformers` implementation.
     /// This should have already been passed through `BasicTokenizer`.
@@ -203,45 +277,46 @@ class WordpieceTokenizer {
         if word.count > maxInputCharsPerWord {
             return [unkToken]
         }
-
+        
         var outputTokens: [String] = []
         var isBad = false
         var start = 0
         var subTokens: [String] = []
-
+        
         while start < word.count {
             var end = word.count
             var currentSubstring: String?
-
+            
             while start < end {
                 var substring = Utils.substr(word, start..<end)!
                 if start > 0 {
                     substring = "##\(substring)"
                 }
-
+                
                 if vocab[substring] != nil {
                     currentSubstring = substring
                     break
                 }
-
+                
                 end -= 1
             }
-
+            
             if currentSubstring == nil {
                 isBad = true
                 break
             }
-
+            
             subTokens.append(currentSubstring!)
             start = end
         }
-
+        
         if isBad {
-            outputTokens.append(unkToken)
+            // Preserve the raw token so higher-level logic can reconstruct exact text
+            outputTokens.append(word)
         } else {
             outputTokens.append(contentsOf: subTokens)
         }
-
+        
         return outputTokens
     }
 }
@@ -255,7 +330,7 @@ struct Utils {
         print("[\(label)] \(diff)ms")
         return result
     }
-
+    
     /// Time a block in seconds and return (output, time)
     static func time<T>(_ block: () -> T) -> (T, Double) {
         let startTime = CFAbsoluteTimeGetCurrent()
@@ -263,24 +338,24 @@ struct Utils {
         let diff = CFAbsoluteTimeGetCurrent() - startTime
         return (result, diff)
     }
-
+    
     /// Return unix timestamp in ms
     static func dateNow() -> Int64 {
         // Use `Int` when we don't support 32-bits devices/OSes anymore.
         // Int crashes on iPhone 5c.
         return Int64(Date().timeIntervalSince1970 * 1000)
     }
-
+    
     /// Clamp a val to [min, max]
     static func clamp<T: Comparable>(_ val: T, _ vmin: T, _ vmax: T) -> T {
         return min(max(vmin, val), vmax)
     }
-
+    
     /// Fake func that can throw.
     static func fakeThrowable<T>(_ input: T) throws -> T {
         return input
     }
-
+    
     /// Substring
     static func substr(_ s: String, _ r: Range<Int>) -> String? {
         let stringCount = s.count
@@ -291,7 +366,7 @@ struct Utils {
         let endIndex = s.index(s.startIndex, offsetBy: r.upperBound)
         return String(s[startIndex..<endIndex])
     }
-
+    
     /// Invert a (k, v) dictionary
     static func invert<K, V>(_ dict: [K: V]) -> [V: K] {
         var inverted: [V: K] = [:]
@@ -318,7 +393,7 @@ extension MLMultiArray {
         }
         return o
     }
-
+    
     /// This will concatenate all dimensions into one one-dim array.
     static func toIntArray(_ o: MLMultiArray) -> [Int] {
         var arr = Array(repeating: 0, count: o.count)
@@ -328,7 +403,7 @@ extension MLMultiArray {
         }
         return arr
     }
-
+    
     /// This will concatenate all dimensions into one one-dim array.
     static func toDoubleArray(_ o: MLMultiArray) -> [Double] {
         var arr: [Double] = Array(repeating: 0, count: o.count)
@@ -338,7 +413,7 @@ extension MLMultiArray {
         }
         return arr
     }
-
+    
     static func toFloatArray(_ o: MLMultiArray) -> [Float] {
         var arr: [Float] = Array(repeating: 0, count: o.count)
         let ptr = UnsafeMutablePointer<Float>(OpaquePointer(o.dataPointer))
@@ -347,7 +422,7 @@ extension MLMultiArray {
         }
         return arr
     }
-
+    
     /// Helper to construct a sequentially-indexed multi array,
     /// useful for debugging and unit tests
     /// Example in 3 dimensions:

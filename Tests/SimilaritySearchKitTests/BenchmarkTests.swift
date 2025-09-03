@@ -35,7 +35,7 @@ class BenchmarkTests: XCTestCase {
         XCTAssertNotNil(embeddings)
     }
 
-    func testDistilbertSearch() {
+    func testDistilbertSearch() throws {
         let searchPassage = MSMarco.testPassage
 
         let expectation = XCTestExpectation(description: "Encoding passage texts")
@@ -48,7 +48,7 @@ class BenchmarkTests: XCTestCase {
                 metadata: [searchPassage.metadata]
             )
 
-            let top_k = await similarityIndex.search("test query")
+            let top_k = try await similarityIndex.search("test query")
             let searchResult: SimilarityIndex.SearchResult = top_k.first!
             XCTAssertEqual(searchResult.text, searchPassage.text)
             XCTAssertEqual(searchResult.metadata, searchPassage.metadata)
@@ -140,7 +140,7 @@ class BenchmarkTests: XCTestCase {
             print("\nSearching \(passageTexts.count) passage texts")
             startTime = CFAbsoluteTimeGetCurrent()
 
-            let top_k = await similarityIndex.search("what is bitcoin?", top: 100)
+            let top_k = try await similarityIndex.search("what is bitcoin?", top: 100)
 
             XCTAssertNotNil(top_k)
 

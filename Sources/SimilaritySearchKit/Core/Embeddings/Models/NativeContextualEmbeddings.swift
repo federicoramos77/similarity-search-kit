@@ -78,7 +78,7 @@ public class NativeContextualEmbeddings: EmbeddingsProtocol {
 
             // Mean pooling: Get the average embedding from totals
             if sequenceLength > 0 {
-                for index in 0 ..< sequenceLength {
+                for index in 0 ..< model.dimension {
                     meanPooledEmbeddings[index] /= Float(sequenceLength)
                 }
             }
