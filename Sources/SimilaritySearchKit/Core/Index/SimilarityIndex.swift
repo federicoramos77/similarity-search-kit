@@ -155,7 +155,10 @@ public class SimilarityIndex: Identifiable, Hashable {
         metric: DistanceMetricProtocol? = nil,
         useMMR: Bool = true,
         mmrLambda: Float = 0.7,
-        mmrCandidateMultiplier: Int = 2
+        mmrCandidateMultiplier: Int = 2,
+        useBM25: Bool = false,
+        bm25K1: Float = 1.5,
+        bm25B: Float = 0.75
     ) async throws -> [SearchResult] {
         // Ensure at least one result is returned.
         let mmrTopK = max(1, resultCount)
@@ -175,20 +178,30 @@ public class SimilarityIndex: Identifiable, Hashable {
             indexEmbeddings.append(item.embedding)
         }
         
-        // Calculate distances and find nearest neighbors
-        if let customMetric = metric {
-            // Allow custom metrics at time of query
-            indexMetric = customMetric
+        // Calculate base results using either embedding similarity or BM25
+        let candidateResults: [(Float, Int)]
+        if useBM25 {
+            // BM25-based retrieval over raw text
+            let corpusTexts: [String] = indexItems.map { $0.text }
+            let bm25Results: [(Float, Int)] = BM25.rank(query: query, documents: corpusTexts, k1: bm25K1, b: bm25B)
+            // Take top candidates according to BM25; MMR (if enabled) will rerank these using embeddings
+            candidateResults = Array(bm25Results.prefix(candidatePoolSize))
+        } else {
+            // Embedding-based retrieval using the configured metric
+            if let customMetric = metric {
+                // Allow custom metrics at time of query
+                indexMetric = customMetric
+            }
+            candidateResults = indexMetric.findNearest(for: queryEmbedding, in: indexEmbeddings, resultsCount: candidatePoolSize)
         }
-        let candidateResults = indexMetric.findNearest(for: queryEmbedding, in: indexEmbeddings, resultsCount: candidatePoolSize)
-        
+
         // If MMR is enabled, rerank the candidate pool by MMR in embedding space
         let finalResultsOrdered: [(Float, Int)]
         if useMMR {
             // Build candidate embeddings in the same order as `candidateResults`
             let candidateIndices = candidateResults.map { $0.1 }
             let candidateEmbeddings: [[Float]] = candidateIndices.map { indexEmbeddings[$0] }
-            
+
             let selectedPositions = try MMR.selectIndices(
                 queryEmbedding: queryEmbedding,
                 documentEmbeddings: candidateEmbeddings,
@@ -196,7 +209,7 @@ public class SimilarityIndex: Identifiable, Hashable {
                 topK: mmrTopK,
                 normalize: true
             )
-            
+
             // Map positions within candidate list back to (score, globalIndex)
             finalResultsOrdered = selectedPositions.map { pos in
                 let (_, globalIndex) = candidateResults[pos]
@@ -204,7 +217,7 @@ public class SimilarityIndex: Identifiable, Hashable {
                 return (origScore, globalIndex)
             }
         } else {
-            // Fallback: just take the top-K by the base metric
+            // Fallback: just take the top-K by the base retrieval (BM25 or embeddings)
             finalResultsOrdered = Array(candidateResults.prefix(mmrTopK))
         }
         
@@ -442,3 +455,4 @@ public extension SimilarityIndex {
         return totalSize
     }
 }
+
