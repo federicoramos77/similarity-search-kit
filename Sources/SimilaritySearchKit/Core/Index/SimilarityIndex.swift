@@ -155,7 +155,10 @@ public class SimilarityIndex: Identifiable, Hashable {
         metric: DistanceMetricProtocol? = nil,
         useMMR: Bool = true,
         mmrLambda: Float = 0.7,
-        mmrCandidateMultiplier: Int = 2
+        mmrCandidateMultiplier: Int = 2,
+        useBM25: Bool = false,
+        bm25K1: Float = 1.5,
+        bm25B: Float = 0.75
     ) async throws -> [SearchResult] {
         // Ensure at least one result is returned.
         let mmrTopK = max(1, resultCount)
@@ -175,20 +178,39 @@ public class SimilarityIndex: Identifiable, Hashable {
             indexEmbeddings.append(item.embedding)
         }
         
-        // Calculate distances and find nearest neighbors
-        if let customMetric = metric {
-            // Allow custom metrics at time of query
-            indexMetric = customMetric
+        // Calculate base results using either embedding similarity or BM25
+        // First compute base results without size limit
+        let baseResults: [(Float, Int)]
+        if useBM25 {
+            // BM25-based retrieval over raw text
+            let corpusTexts: [String] = indexItems.map { $0.text }
+            baseResults = BM25.rank(query: query, documents: corpusTexts, k1: bm25K1, b: bm25B)
+        } else {
+            // Embedding-based retrieval using the configured metric
+            if let customMetric = metric {
+                // Allow custom metrics at time of query
+                indexMetric = customMetric
+            }
+            baseResults = indexMetric.findNearest(for: queryEmbedding, in: indexEmbeddings, resultsCount: indexEmbeddings.count)
         }
-        let candidateResults = indexMetric.findNearest(for: queryEmbedding, in: indexEmbeddings, resultsCount: candidatePoolSize)
+
+        // Deduplicate by item ID while preserving order, then limit to candidatePoolSize
+        var seenIdsForCandidates = Set<String>()
+        var candidateResults: [(Float, Int)] = []
+        for (score, idx) in baseResults {
+            let id = indexIds[idx]
+            if seenIdsForCandidates.insert(id).inserted {
+                candidateResults.append((score, idx))
+                if candidateResults.count == candidatePoolSize { break }
+            }
+        }
         
-        // If MMR is enabled, rerank the candidate pool by MMR in embedding space
-        let finalResultsOrdered: [(Float, Int)]
+        // If MMR is enabled, rerank the deduplicated candidates by MMR in embedding space
+        let finalResults: [(Float, Int)]
         if useMMR {
-            // Build candidate embeddings in the same order as `candidateResults`
             let candidateIndices = candidateResults.map { $0.1 }
             let candidateEmbeddings: [[Float]] = candidateIndices.map { indexEmbeddings[$0] }
-            
+
             let selectedPositions = try MMR.selectIndices(
                 queryEmbedding: queryEmbedding,
                 documentEmbeddings: candidateEmbeddings,
@@ -196,29 +218,22 @@ public class SimilarityIndex: Identifiable, Hashable {
                 topK: mmrTopK,
                 normalize: true
             )
-            
+
             // Map positions within candidate list back to (score, globalIndex)
-            finalResultsOrdered = selectedPositions.map { pos in
-                let (_, globalIndex) = candidateResults[pos]
-                let (origScore, _) = candidateResults[pos]
+            finalResults = selectedPositions.map { pos in
+                let (origScore, globalIndex) = candidateResults[pos]
                 return (origScore, globalIndex)
             }
         } else {
-            // Fallback: just take the top-K by the base metric
-            finalResultsOrdered = Array(candidateResults.prefix(mmrTopK))
+            // Fallback: just take the top-K by the base retrieval (BM25 or embeddings)
+            finalResults = Array(candidateResults.prefix(mmrTopK))
         }
-        
-        // Map results to index ids
-        return finalResultsOrdered.compactMap { result in
+
+        // Map results directly by index to avoid mis-mapping when duplicate IDs exist
+        return finalResults.map { result in
             let (score, index) = result
-            let id = indexIds[index]
-            
-            if let item = getItem(id: id) {
-                return SearchResult(id: item.id, score: score, text: item.text, metadata: item.metadata)
-            } else {
-                print("Failed to find item with id '\(id)' in indexItems.")
-                return SearchResult(id: "000000", score: 0.0, text: "fail", metadata: [:])
-            }
+            let item = indexItems[index]
+            return SearchResult(id: item.id, score: score, text: item.text, metadata: item.metadata)
         }
     }
     
@@ -442,3 +457,4 @@ public extension SimilarityIndex {
         return totalSize
     }
 }
+
