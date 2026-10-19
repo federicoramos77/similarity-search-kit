@@ -6,8 +6,8 @@ import PackageDescription
 let package = Package(
     name: "SimilaritySearchKit",
     platforms: [
-        .macOS(.v11),
-        .iOS(.v15),
+        .macOS(.v13),
+        .iOS(.v16),
     ],
     products: [
         .library(
